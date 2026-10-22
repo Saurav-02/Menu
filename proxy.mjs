@@ -37,8 +37,9 @@ function deny(res) {
 const server = http.createServer((req, res) => {
   if (req.url === "/healthz") { res.writeHead(200, { "Content-Type": "text/plain" }); res.end("ok\n"); return; }
   if (!passwordOk(req)) return deny(res);
+  const fwdHeaders = { ...req.headers, host: `${TARGET_HOST}:${TARGET_PORT}` };
   const upstream = http.request(
-    { host: TARGET_HOST, port: TARGET_PORT, path: req.url, method: req.method, headers: req.headers },
+    { host: TARGET_HOST, port: TARGET_PORT, path: req.url, method: req.method, headers: fwdHeaders },
     (up) => { res.writeHead(up.statusCode || 502, up.headers); up.pipe(res); }
   );
   upstream.on("error", () => { if (!res.headersSent) res.writeHead(502); res.end("hub unreachable\n"); });
@@ -53,7 +54,8 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
   const upstream = net.connect(TARGET_PORT, TARGET_HOST, () => {
-    const headers = Object.entries(req.headers).map(([k, v]) => `${k}: ${v}`).join("\r\n");
+    const fwd = { ...req.headers, host: `${TARGET_HOST}:${TARGET_PORT}` };
+    const headers = Object.entries(fwd).map(([k, v]) => `${k}: ${v}`).join("\r\n");
     upstream.write(`${req.method} ${req.url} HTTP/${req.httpVersion}\r\n${headers}\r\n\r\n`);
     if (head && head.length) upstream.write(head);
     upstream.pipe(socket);
