@@ -1,0 +1,16 @@
+# Render Blueprint — creates the agy-hub web service from this repo.
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: agy-hub
+    runtime: docker
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      # You set this in the Render dashboard (never commit it):
+      # the password for the hub's login prompt. Username can be anything.
+      - key: HUB_PASSWORD
+        sync: false
+      # GitHub MCP bridge the agent should use (same as the desktop app).
+      - key: MCP_BRIDGE_URL
+        value: https://mcp-2-75va.onrender.com
