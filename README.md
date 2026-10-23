@@ -26,24 +26,30 @@ How it fits together:
    `HUB_PASSWORD` to a password you choose. Never commit it anywhere.
    (`MCP_BRIDGE_URL` is already set by render.yaml.)
 4. **Deploy.** The first build downloads and installs agy — a few minutes.
-5. **Sign in once:** Render dashboard → your service → **Shell** tab → run:
-   ```sh
-   export PATH="$HOME/.local/bin:$PATH"
-   agy
-   ```
-   It prints a Google sign-in link. Open it on your phone, sign in with the
-   AI Pro account, paste the code back into the shell. Then restart the
-   service (Manual Deploy → Restart service, or let it sleep and wake).
-6. **Open your service URL** (e.g. `https://agy-hub.onrender.com`) in Chrome.
+5. **Open your service URL** (e.g. `https://agy-hub.onrender.com`) in Chrome.
    The browser asks for a username and password — any username works,
-   password is your `HUB_PASSWORD`. The Antigravity hub loads. Chat away.
+   password is your `HUB_PASSWORD`. The Antigravity hub loads.
+6. **Sign in through the browser** (no Shell needed — Shell is paid on
+   Render). The hub's own "Continue with Google" button can't work raw on
+   Render: it makes agy open Google sign-in in a browser *on the server*,
+   and a headless container has none. So `start.sh` installs a browser
+   shim that captures the sign-in link instead, and the gate serves it:
+   1. In the hub tab, tap **Continue with Google**. It will spin — expected,
+      leave it spinning.
+   2. Open `<your service URL>/signin` in a second tab (same password).
+   3. Tap **Open Google sign-in**, sign in with the AI Pro account.
+   4. Google then sends your browser to a `localhost` page that won't
+      load — normal. **Copy that whole address-bar URL.**
+   5. Back on the `/signin` tab, paste the URL into the box and tap
+      **Finish sign-in**.
+   6. Switch back to the hub tab — you're signed in. Chat away.
 
 ## The honest limits (free tier)
 
 - **Sleep:** after ~15 idle minutes Render stops the service. The next visit
   wakes it in about a minute. A task that is *running* when it sleeps dies.
 - **Amnesia:** Render wipes the disk on restart/redeploy, so chat history
-  resets and you may need the 1-minute Shell sign-in again.
+  resets and you redo the 1-minute browser sign-in via `/signin`.
   To make sign-in survive restarts, add these two files as **Secret Files**
   in the Render dashboard (Environment → Secret Files) — `start.sh` picks
   them up automatically at boot:
@@ -58,3 +64,11 @@ How it fits together:
 The gate was tested against the real hub: no password → 401, wrong password
 → 401, correct password → the hub page loads, WebSocket upgrade → 101,
 `/healthz` → 200 without auth (that's what render.yaml's health check uses).
+
+The browser sign-in was verified end to end against an unsigned hub
+(2026-10-23): triggering the hub's Login made the shim capture the real
+Google OAuth URL; the gate's `/signin` page served it; a pasted
+`localhost:<port>/auth/callback?code=...&state=...` URL was forwarded to
+agy's callback listener, which validated the state and attempted the token
+exchange with Google (a fake code correctly came back
+`invalid_grant / Malformed auth code` — a real code completes the sign-in).
