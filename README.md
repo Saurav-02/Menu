@@ -10,7 +10,13 @@ How it fits together:
 - `proxy.mjs` is a tiny dependency-free gate in front of it: it listens on
   Render's `$PORT`, requires a **Basic-auth password** (`HUB_PASSWORD`), and
   forwards HTTP + WebSocket traffic to the hub. Nothing reaches the hub
-  without the password.
+  without the password. Visitors without it get a full-screen notice page
+  ("personal, self-deployed — no permission to access"); the password
+  prompt appears when they tap the owner sign-in button. If the hub behind
+  the gate is down, the gate serves an auto-reloading "Antigravity is
+  sleeping" page instead of a bare error. (While Render has the instance
+  fully stopped, requests never reach the gate — Render's own wake-up
+  handling applies until the gate is alive.)
 - `start.sh` boots everything: restores the Google sign-in if token files
   were provided as Render secret files, attaches the GitHub MCP bridge
   (`github-bridge`), starts the hub, then starts the gate.
@@ -55,6 +61,10 @@ How it fits together:
   them up automatically at boot:
   - `antigravity-oauth-token`
   - `jetski-standalone-oauth-token`
+
+  To get the files: sign in to the hub once, then open
+  `<your service URL>/backup` (same password prompt) and download both.
+  Upload each as a secret file with its filename exactly as shown.
 - **Security:** the password gate is the only lock. With it, someone would
   need your `HUB_PASSWORD` to reach the hub — and through it, your AI Pro
   quota and the GitHub bridge. Pick a real password.

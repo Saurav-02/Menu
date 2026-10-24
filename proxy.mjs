@@ -45,8 +45,10 @@ function passwordOk(req) {
 }
 
 function deny(res) {
-  res.writeHead(401, { "WWW-Authenticate": 'Basic realm="agy-hub"', "Content-Type": "text/plain" });
-  res.end("Authentication required.\n");
+  // The 401 body is what a visitor sees if they cancel the password prompt
+  // or type a wrong password — make it the same notice as the landing page.
+  res.writeHead(401, { "WWW-Authenticate": 'Basic realm="agy-hub"', "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(noticeHtml(false));
 }
 
 function esc(s) {
@@ -75,6 +77,42 @@ a.btn,button{display:block;width:100%;box-sizing:border-box;text-align:center;ba
 textarea{width:100%;box-sizing:border-box;background:#000;color:#eee;border:1px solid #444;border-radius:10px;padding:10px;font-size:13px;min-height:74px}
 .small{color:#aaa;font-size:13px;line-height:1.5} code{background:#000;padding:1px 5px;border-radius:5px}</style></head>
 <body><div class="card">${body}</div></body></html>`;
+}
+
+// Public notice for visitors without the password: this is a personal,
+// self-deployed page and they don't have permission to access it. Shown as
+// the landing page (with an owner sign-in button) and as the 401 body.
+function noticeHtml(withButton) {
+  const btn = withButton ? `<p><a class="btn" href="/enter">I'm the owner — sign in</a></p>` : "";
+  return page("Private page", `<div style="text-align:center">
+<p style="font-size:44px;margin:6px 0">🔒</p>
+<h2>This is a personal page</h2>
+<p class="small">This hub is privately self-deployed by its owner for personal use. It isn't a public service, and you don't have permission to access it.</p>
+${btn}
+<p class="small">If you received this link by mistake, you can safely close this tab.</p>
+</div>`);
+}
+
+function noticePage(res) {
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(noticeHtml(true));
+}
+
+// Shown when the gate is up but the hub behind it isn't answering (hub
+// crashed, or still starting): a full-screen "sleeping" page that reloads
+// itself every 20s, so a waiting visitor lands in the hub once it's back.
+function sleepingHtml() {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="refresh" content="20"><title>Antigravity is sleeping</title>
+<style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;margin:0;padding:20px}
+.card{max-width:560px;margin:24px auto;background:#1d1d1f;border-radius:14px;padding:22px}
+a.btn{display:block;width:100%;box-sizing:border-box;text-align:center;background:#2f6fed;color:#fff;border:0;border-radius:10px;padding:14px;font-size:16px;text-decoration:none;cursor:pointer;margin:14px 0}
+.small{color:#aaa;font-size:13px;line-height:1.5}</style></head>
+<body><div class="card"><div style="text-align:center">
+<p style="font-size:44px;margin:6px 0">😴</p>
+<h2>Antigravity is sleeping</h2>
+<p class="small">The hub naps when it's idle — and while it restarts — to save energy. It usually wakes within a minute or two. This page reloads itself, so just leave it open and the hub will appear on its own.</p>
+<p><a class="btn" href="/">Check now</a></p>
+</div></div></body></html>`;
 }
 
 function signinPage(res, note = "") {
@@ -154,18 +192,78 @@ function finishSignin(req, res) {
   });
 }
 
+// Session backup (/backup): start.sh already restores the Google sign-in
+// at boot from Render secret files, but there was no way to GET the token
+// files out of the running container (Render's Shell is paid). This page —
+// behind the same Basic-auth password as everything else — serves the two
+// token files as downloads so they can be uploaded once as secret files.
+// After that, every restart/redeploy boots already signed in.
+const TOKEN_FILES = {
+  "antigravity-oauth-token": path.join(os.homedir(), ".gemini", "antigravity-cli", "antigravity-oauth-token"),
+  "jetski-standalone-oauth-token": path.join(os.homedir(), ".gemini", "jetski-standalone-oauth-token"),
+};
+
+function backupPage(res) {
+  let body = `<h2>Session backup</h2>
+<p class="small">These two files <b>are</b> your hub's Google sign-in. Download both, then in the Render dashboard open your service → <b>Environment → Secret Files → Add Secret File</b> and upload each one with its filename <b>exactly</b> as shown. From the next boot on, the hub restores them automatically and opens already signed in — no Google step after a restart.</p>
+<p class="small">Treat the downloads like a password: anyone holding them can act as your signed-in hub. This page sits behind the same hub password prompt as the hub itself.</p>`;
+  for (const [name, file] of Object.entries(TOKEN_FILES)) {
+    let st = null;
+    try { st = fs.statSync(file); } catch { /* not signed in yet */ }
+    if (st) {
+      body += `<p><a class="btn" href="/backup/${esc(name)}" download>Download ${esc(name)}</a><br><span class="small">${st.size} bytes · saved ${esc(st.mtime.toISOString())}</span></p>`;
+    } else {
+      body += `<p class="small"><code>${esc(name)}</code> — not found. Sign in to the hub first, then reload this page.</p>`;
+    }
+  }
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(page("Session backup", body));
+}
+
+function backupDownload(res, name) {
+  const file = TOKEN_FILES[name];
+  if (!file) { res.writeHead(404, { "Content-Type": "text/plain" }); res.end("not found\n"); return; }
+  fs.readFile(file, (err, data) => {
+    if (err) { res.writeHead(404, { "Content-Type": "text/plain" }); res.end("token file not found — sign in first\n"); return; }
+    res.writeHead(200, {
+      "Content-Type": "application/octet-stream",
+      "Content-Disposition": `attachment; filename="${name}"`,
+      "Content-Length": data.length,
+      "Cache-Control": "no-store",
+    });
+    res.end(data);
+  });
+}
+
 const server = http.createServer((req, res) => {
   if (req.url === "/healthz") { res.writeHead(200, { "Content-Type": "text/plain" }); res.end("ok\n"); return; }
-  if (!passwordOk(req)) return deny(res);
   const pathOnly = (req.url || "").split("?")[0];
+  if (!passwordOk(req)) {
+    // Public landing: a visitor without the password sees the notice page,
+    // not a bare browser prompt. The prompt appears when they tap the
+    // owner sign-in button (/enter) or open any other protected path.
+    if (req.method === "GET" && pathOnly === "/") return noticePage(res);
+    return deny(res);
+  }
+  if (pathOnly === "/enter") { res.writeHead(302, { Location: "/" }); res.end(); return; }
   if (pathOnly === "/signin" && req.method === "GET") return signinPage(res);
   if (pathOnly === "/signin/finish" && req.method === "POST") return finishSignin(req, res);
+  if (pathOnly === "/backup" && req.method === "GET") return backupPage(res);
+  if (pathOnly.startsWith("/backup/") && req.method === "GET") return backupDownload(res, decodeURIComponent(pathOnly.slice("/backup/".length)));
   const fwdHeaders = { ...req.headers, host: `${TARGET_HOST}:${TARGET_PORT}` };
   const upstream = http.request(
     { host: TARGET_HOST, port: TARGET_PORT, path: req.url, method: req.method, headers: fwdHeaders },
     (up) => { res.writeHead(up.statusCode || 502, up.headers); up.pipe(res); }
   );
-  upstream.on("error", () => { if (!res.headersSent) res.writeHead(502); res.end("hub unreachable\n"); });
+  upstream.on("error", () => {
+    // Gate is up but the hub behind it isn't answering (crashed or still
+    // starting): serve the sleeping page — it auto-reloads until the hub
+    // is back, instead of a bare "hub unreachable" error.
+    if (!res.headersSent) {
+      res.writeHead(503, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(sleepingHtml());
+    } else res.end();
+  });
   req.pipe(upstream);
 });
 
