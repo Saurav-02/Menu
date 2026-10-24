@@ -46,19 +46,32 @@ fi
 
 # --- 1d. Restore the chat state from GitHub, if configured (wins over 1c).
 # With STATE_GITHUB_REPO + STATE_GITHUB_TOKEN set, the gate keeps a fresh
-# snapshot of the chat state in that (private!) repo as agy-state.txt, and
-# it is newer than any manually pasted secret file — so pull it last.
-# First run 404s (nothing pushed yet): fine, boot continues either way.
+# snapshot of the chat state in that (private!) repo, and it is newer than
+# any manually pasted secret file — so pull it last. Try the current
+# format first (agy-state.tar.gz, raw gzip bytes via the Git Data API),
+# then fall back to the legacy format (agy-state.txt, base64 text via the
+# Contents API) — never boot empty while a good old snapshot exists.
+# First run 404s on both (nothing pushed yet): fine, boot continues either way.
 if [ -n "${STATE_GITHUB_TOKEN:-}" ] && [ -n "${STATE_GITHUB_REPO:-}" ]; then
   STATE_TMP="$(mktemp)"
+  STATE_PULLED=""
   if curl -fsSL --max-time 30 \
+      -H "Authorization: Bearer $STATE_GITHUB_TOKEN" \
+      -H "Accept: application/vnd.github.raw+json" \
+      "${STATE_GITHUB_API:-https://api.github.com}/repos/$STATE_GITHUB_REPO/contents/agy-state.tar.gz?ref=main" \
+      -o "$STATE_TMP" && [ -s "$STATE_TMP" ]; then
+    STATE_PULLED="agy-state.tar.gz"
+  elif curl -fsSL --max-time 30 \
       -H "Authorization: Bearer $STATE_GITHUB_TOKEN" \
       -H "Accept: application/vnd.github.raw+json" \
       "${STATE_GITHUB_API:-https://api.github.com}/repos/$STATE_GITHUB_REPO/contents/agy-state.txt?ref=main" \
       -o "$STATE_TMP" && [ -s "$STATE_TMP" ]; then
+    STATE_PULLED="agy-state.txt"
+  fi
+  if [ -n "$STATE_PULLED" ]; then
     mkdir -p "$HOME/.gemini"
     if node "$SCRIPT_DIR/statetool.mjs" unpack "$STATE_TMP" "$HOME/.gemini"; then
-      echo "Restored chat state from GitHub."
+      echo "Restored chat state from GitHub ($STATE_PULLED)."
     else
       echo "Chat state restore from GitHub FAILED — keeping secret-file state." >&2
     fi

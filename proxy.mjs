@@ -21,7 +21,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { packStateText, stateInfo } from "./statetool.mjs";
+import { packStateText, packStateFile, hashAndBase64File, stateInfo } from "./statetool.mjs";
 
 const PORT = Number(process.env.PORT || 10000);
 const TARGET_HOST = "127.0.0.1";
@@ -266,21 +266,27 @@ function backupDownload(res, name) {
 // --- Optional automatic chat-state sync to GitHub -------------------------
 // Active only when STATE_GITHUB_REPO + STATE_GITHUB_TOKEN are both set
 // (a fine-grained PAT with Contents RW on that one PRIVATE repo). The gate
-// packs the chat state (the same base64 text /backup serves) every few
-// minutes when it changed and PUTs it to agy-state.txt on branch main;
+// packs the chat state every few minutes when it changed and stores the
+// RAW gzip bytes as agy-state.tar.gz on branch main via the Git Data API;
 // start.sh pulls it back at boot (section 1d, winning over the secret
 // file), so restarts restore the freshest chats with no manual
 // download/paste. Failures are logged once per attempt and swallowed —
 // sync must never disturb request handling.
+//
+// Memory note (2026-10-24 OOM lesson): the old Contents-API path stacked
+// tar + gzip + base64 text + double-base64 JSON in memory (~80MB+
+// transient for a ~19.5M-char snapshot) on a 512MB free instance. This
+// path streams the pack to a temp file and base64s it in one streaming
+// pass, so a push peaks at roughly the base64 string plus its JSON
+// wrapper (~2.7x the gzip size) and never holds the tar at all.
 const SYNC_REPO = process.env.STATE_GITHUB_REPO || "";
 const SYNC_TOKEN = process.env.STATE_GITHUB_TOKEN || "";
 const SYNC_API = (process.env.STATE_GITHUB_API || "https://api.github.com").replace(/\/+$/, "");
 const SYNC_INTERVAL_MS = Number(process.env.STATE_SYNC_INTERVAL_MS || 180000);
 const SYNC_INITIAL_MS = Number(process.env.STATE_SYNC_INITIAL_MS || 30000);
-const SYNC_URL = `${SYNC_API}/repos/${SYNC_REPO}/contents/agy-state.txt`;
+const SYNC_FILE = "agy-state.tar.gz";
 
 let syncLastHash = "";
-let syncSha = null;
 let syncBusy = false;
 
 function syncHeaders(extra = {}) {
@@ -292,56 +298,91 @@ function syncHeaders(extra = {}) {
   };
 }
 
-// Learn the current file's sha (needed to overwrite it). Returns false on
-// 404 — the file doesn't exist yet, so a PUT without sha creates it.
-async function syncFetchSha() {
-  const r = await fetch(`${SYNC_URL}?ref=main`, { headers: syncHeaders({ Accept: "application/vnd.github+json" }) });
-  if (r.status === 404) { syncSha = null; return false; }
-  if (!r.ok) throw new Error(`GET state sha -> HTTP ${r.status}`);
-  const j = await r.json();
-  syncSha = j.sha || null;
-  return true;
+async function syncApi(path, method, body) {
+  const r = await fetch(`${SYNC_API}${path}`, {
+    method,
+    headers: syncHeaders({ "Content-Type": "application/json" }),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const j = await r.json().catch(() => null);
+  if (!r.ok) {
+    const err = new Error(`${method} ${path} -> HTTP ${r.status}`);
+    err.status = r.status;
+    err.body = j;
+    throw err;
+  }
+  return j;
+}
+
+// Current head commit of main, or null when the branch doesn't exist yet
+// (fresh repo). Returns { headSha, baseTree } — baseTree is the head
+// commit's tree, so the new tree keeps every other file in the repo.
+async function syncHead() {
+  const r = await fetch(`${SYNC_API}/repos/${SYNC_REPO}/git/ref/heads/main`, { headers: syncHeaders({ Accept: "application/vnd.github+json" }) });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`GET ref -> HTTP ${r.status}`);
+  const ref = await r.json();
+  const headSha = ref && ref.object && ref.object.sha;
+  if (!headSha) throw new Error("GET ref -> no head sha");
+  const commit = await syncApi(`/repos/${SYNC_REPO}/git/commits/${headSha}`, "GET");
+  return { headSha, baseTree: commit && commit.tree && commit.tree.sha };
+}
+
+// The tail of a push: tree -> commit -> ref update. Retried once with a
+// freshly fetched head when GitHub reports a conflict (stale ref).
+async function syncPushTail(blobSha) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const head = await syncHead();
+      const treeBody = { tree: [{ path: SYNC_FILE, mode: "100644", type: "blob", sha: blobSha }] };
+      if (head && head.baseTree) treeBody.base_tree = head.baseTree;
+      const tree = await syncApi(`/repos/${SYNC_REPO}/git/trees`, "POST", treeBody);
+      const commit = await syncApi(`/repos/${SYNC_REPO}/git/commits`, "POST", {
+        message: "hub state snapshot",
+        tree: tree.sha,
+        parents: head ? [head.headSha] : [],
+      });
+      if (head) {
+        await syncApi(`/repos/${SYNC_REPO}/git/refs/heads/main`, "PATCH", { sha: commit.sha, force: false });
+      } else {
+        await syncApi(`/repos/${SYNC_REPO}/git/refs`, "POST", { ref: "refs/heads/main", sha: commit.sha });
+      }
+      return;
+    } catch (e) {
+      lastErr = e;
+      if ((e.status === 409 || e.status === 422) && attempt === 0) continue; // stale head — refetch and retry once
+      throw e;
+    }
+  }
+  throw lastErr;
 }
 
 async function syncPushOnce() {
   if (syncBusy) return;
   syncBusy = true;
+  let tmpDir = null;
   try {
     const info = stateInfo(STATE_DIR);
     if (!info || info.files === 0) return;
-    const text = packStateText(STATE_DIR);
-    const hash = crypto.createHash("sha256").update(text).digest("hex");
+    // Stream the pack to disk, then hash + base64 it in one streaming
+    // pass — the tar itself never sits in memory.
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-state-"));
+    const gzPath = path.join(tmpDir, "state.tar.gz");
+    await packStateFile(STATE_DIR, gzPath);
+    const { hash, base64 } = await hashAndBase64File(gzPath);
     if (hash === syncLastHash) return; // unchanged since last good push
-    // Two base64 layers are intended: the file content IS our base64 text,
-    // and the Contents API base64-wraps whatever file bytes it stores.
-    const content = Buffer.from(text, "utf8").toString("base64");
-    for (let attempt = 0; attempt < 2; attempt++) {
-      if (syncSha === null && attempt === 0) await syncFetchSha();
-      const body = { message: "hub state snapshot", branch: "main", content };
-      if (syncSha) body.sha = syncSha;
-      const r = await fetch(SYNC_URL, {
-        method: "PUT",
-        headers: syncHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify(body),
-      });
-      if (r.ok) {
-        const j = await r.json().catch(() => null);
-        if (j && j.content && j.content.sha) syncSha = j.content.sha;
-        syncLastHash = hash;
-        console.log(`state sync: pushed snapshot (${text.length} chars) to ${SYNC_REPO}`);
-        return;
-      }
-      if ((r.status === 409 || r.status === 422) && attempt === 0) {
-        syncSha = null;
-        await syncFetchSha(); // stale sha — refresh and retry the PUT once
-        continue;
-      }
-      throw new Error(`PUT state -> HTTP ${r.status}`);
-    }
+    const blob = await syncApi(`/repos/${SYNC_REPO}/git/blobs`, "POST", { content: base64, encoding: "base64" });
+    await syncPushTail(blob.sha);
+    syncLastHash = hash;
+    const mb = (n) => (n / 1048576).toFixed(2);
+    console.log(`state sync: pushed snapshot (${base64.length} chars) to ${SYNC_REPO}`);
+    console.log(`state sync: largest: ${info.largest.map((f) => `${f.path} ${mb(f.size)} MB`).join(", ")}; by dir: ${Object.entries(info.byDir).map(([d, b]) => `${d} ${mb(b)} MB`).join(", ")}`);
   } catch (e) {
     console.log(`state sync: ${e && e.message ? e.message : e} (will retry next tick)`);
   } finally {
     syncBusy = false;
+    if (tmpDir) { try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* best effort */ } }
   }
 }
 

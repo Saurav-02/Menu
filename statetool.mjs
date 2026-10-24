@@ -14,6 +14,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
+import { createHash as cryptoCreateHash } from "node:crypto";
 
 // The state worth preserving, relative to ~/.gemini: the chat state under
 // antigravity-cli/ plus the user settings (config/config.json holds the
@@ -50,8 +51,20 @@ export function stateInfo(baseDir) {
   const entries = [];
   for (const rel of STATE_PATHS) walk(baseDir, rel, entries);
   let bytes = 0, newest = 0;
-  for (const e of entries) { bytes += e.size; if (!e.dir && e.mtime.getTime() > newest) newest = e.mtime.getTime(); }
-  return { files: entries.filter((e) => !e.dir).length, bytes, newest };
+  const byDir = {};
+  for (const e of entries) {
+    if (e.dir) continue;
+    bytes += e.size;
+    if (e.mtime.getTime() > newest) newest = e.mtime.getTime();
+    const dir = e.rel.split("/").slice(0, 2).join("/");
+    byDir[dir] = (byDir[dir] || 0) + e.size;
+  }
+  const largest = entries
+    .filter((e) => !e.dir)
+    .sort((a, b) => b.size - a.size)
+    .slice(0, 8)
+    .map((e) => ({ path: e.rel, size: e.size }));
+  return { files: entries.filter((e) => !e.dir).length, bytes, newest, largest, byDir };
 }
 
 // --- minimal ustar writer -------------------------------------------------
@@ -84,26 +97,68 @@ function pad512(buf) {
   return rem === 0 ? buf : Buffer.concat([buf, Buffer.alloc(512 - rem)]);
 }
 
-export function packState(baseDir) {
+// Yields the tar stream for a tree, chunk by chunk, in a fixed order
+// (STATE_PATHS order, readdir sorted). Both packers below consume it,
+// so the in-memory and streaming forms describe the same archive.
+function* tarChunks(baseDir) {
   const entries = [];
   for (const rel of STATE_PATHS) walk(baseDir, rel, entries);
-  const chunks = [];
   for (const e of entries) {
     if (e.rel.length > 100) {
       const nameBuf = Buffer.from(e.rel + "\0", "utf8");
-      chunks.push(tarHeader("././@LongLink", nameBuf.length, 0o644, 0, "L"));
-      chunks.push(pad512(nameBuf));
+      yield tarHeader("././@LongLink", nameBuf.length, 0o644, 0, "L");
+      yield pad512(nameBuf);
     }
     if (e.dir) {
-      chunks.push(tarHeader(e.rel, 0, e.mode, Math.floor(e.mtime.getTime() / 1000), "5"));
+      yield tarHeader(e.rel, 0, e.mode, Math.floor(e.mtime.getTime() / 1000), "5");
     } else {
       const data = fs.readFileSync(e.abs);
-      chunks.push(tarHeader(e.rel, data.length, e.mode, Math.floor(e.mtime.getTime() / 1000), "0"));
-      chunks.push(pad512(data));
+      yield tarHeader(e.rel, data.length, e.mode, Math.floor(e.mtime.getTime() / 1000), "0");
+      yield pad512(data);
     }
   }
-  chunks.push(Buffer.alloc(1024)); // end-of-archive marker
-  return zlib.gzipSync(Buffer.concat(chunks), { level: 9 });
+  yield Buffer.alloc(1024); // end-of-archive marker
+}
+
+export function packState(baseDir) {
+  return zlib.gzipSync(Buffer.concat([...tarChunks(baseDir)]), { level: 9 });
+}
+
+// Streaming form of packState: writes the same gzip archive to a file
+// without ever holding the tar, the gzip output, or any base64 form in
+// memory. Used by the GitHub sync push, where the old in-memory path
+// stacked tar + gzip + base64 text + double-base64 JSON (~80MB+ transient
+// for a ~19.5M-char snapshot) on top of the hub's own usage — on a 512MB
+// Render free instance, that is what gets the process killed.
+export function packStateFile(baseDir, outPath) {
+  return new Promise((resolve, reject) => {
+    const gz = zlib.createGzip({ level: 9 });
+    const out = fs.createWriteStream(outPath);
+    gz.on("error", reject);
+    out.on("error", reject);
+    out.on("finish", resolve);
+    gz.pipe(out);
+    for (const chunk of tarChunks(baseDir)) gz.write(chunk);
+    gz.end();
+  });
+}
+
+// One streaming pass over a file: sha256 of its bytes plus its base64
+// text, without loading the file itself. Base64 is emitted in 3-byte
+// aligned chunks, so the result is identical to Buffer.toString("base64").
+export async function hashAndBase64File(filePath) {
+  const hash = cryptoCreateHash("sha256");
+  let base64 = "";
+  let leftover = Buffer.alloc(0);
+  for await (const chunk of fs.createReadStream(filePath)) {
+    hash.update(chunk);
+    const buf = Buffer.concat([leftover, chunk]);
+    const cut = buf.length - (buf.length % 3);
+    base64 += buf.subarray(0, cut).toString("base64");
+    leftover = buf.subarray(cut);
+  }
+  if (leftover.length) base64 += leftover.toString("base64");
+  return { hash: hash.digest("hex"), base64 };
 }
 
 // Paste-safe form: base64 text of the packed archive. Render's secret-file
@@ -176,11 +231,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     const buf = packState(a);
     fs.writeFileSync(b, buf);
     console.log(`packed ${buf.length} bytes -> ${b}`);
+  } else if (cmd === "packfile") {
+    await packStateFile(a, b);
+    console.log(`packed ${fs.statSync(b).size} bytes -> ${b}`);
   } else if (cmd === "unpack") {
     const n = unpackState(fs.readFileSync(a), b);
     console.log(`unpacked ${n} files -> ${b}`);
   } else {
-    console.error("usage: statetool.mjs pack <baseDir> <outFile> | unpack <archive> <destDir>");
+    console.error("usage: statetool.mjs pack <baseDir> <outFile> | packfile <baseDir> <outFile> | unpack <archive> <destDir>");
     process.exit(2);
   }
 }
