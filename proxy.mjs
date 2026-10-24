@@ -393,7 +393,7 @@ self.addEventListener("activate", (event) => { event.waitUntil(self.clients.clai
 self.addEventListener("fetch", () => { /* pass-through: no respondWith */ });
 `;
 
-const PWA_SNIPPET = `<link rel="manifest" href="/manifest.webmanifest"><meta name="theme-color" content="#000000"><link rel="apple-touch-icon" href="/pwa/icon-192.png"><script>if("serviceWorker" in navigator){addEventListener("load",function(){navigator.serviceWorker.register("/pwa/sw.js",{scope:"/"}).catch(function(){})})}</script>`;
+const PWA_SNIPPET = `<link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/pwa/icon-192.png"><script>if("serviceWorker" in navigator){addEventListener("load",function(){navigator.serviceWorker.register("/pwa/sw.js",{scope:"/"}).catch(function(){})})}</script>`;
 
 function servePwa(pathOnly, res) {
   if (pathOnly === "/manifest.webmanifest") {
