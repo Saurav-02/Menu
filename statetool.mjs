@@ -101,9 +101,23 @@ export function packState(baseDir) {
   return zlib.gzipSync(Buffer.concat(chunks), { level: 9 });
 }
 
+// Paste-safe form: base64 text of the packed archive. Render's secret-file
+// editor is a paste box, and pasting raw binary corrupts it (seen live:
+// gunzip "incorrect header check" at boot). Base64 is plain ASCII, so it
+// survives paste, text editors, and chat apps untouched.
+export function packStateText(baseDir) {
+  return packState(baseDir).toString("base64");
+}
+
 // --- minimal ustar reader ---------------------------------------------------
 export function unpackState(gzBuffer, destDir) {
-  const tar = zlib.gunzipSync(gzBuffer);
+  // Accept both the raw .tar.gz and its base64 text form (see above) —
+  // sniff the gzip magic bytes; anything else is treated as base64 text.
+  let raw = gzBuffer;
+  if (!(raw.length > 2 && raw[0] === 0x1f && raw[1] === 0x8b)) {
+    raw = Buffer.from(raw.toString("utf8").replace(/\s+/g, ""), "base64");
+  }
+  const tar = zlib.gunzipSync(raw);
   const root = path.resolve(destDir);
   fs.mkdirSync(root, { recursive: true });
   let off = 0, longName = null, count = 0;
