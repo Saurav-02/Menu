@@ -223,7 +223,7 @@ function backupPage(res) {
   const info = stateInfo(STATE_DIR);
   body += `<h2 style="margin-top:28px">Chat backup</h2>`;
   if (info.files > 0) {
-    body += `<p class="small">Your conversations (${info.files} files, ${(info.bytes / 1024).toFixed(0)} KB, last changed ${esc(new Date(info.newest).toISOString())}) packed into one <b>text</b> file. Download it, open it, copy <b>all</b> the text, and paste it in Render as the contents of a secret file named <b>exactly</b> <code>agy-state.tar.gz</code>. (It's text on purpose: Render's secret-file box is a paste box, and pasting the raw binary version corrupts it.) Every boot then restores your chats. It's a snapshot — re-download and re-paste after important chats to refresh it.</p>
+    body += `<p class="small">Your conversations and settings (${info.files} files, ${(info.bytes / 1024).toFixed(0)} KB, last changed ${esc(new Date(info.newest).toISOString())}) packed into one <b>text</b> file. Download it, open it, copy <b>all</b> the text, and paste it in Render as the contents of a secret file named <b>exactly</b> <code>agy-state.tar.gz</code>. (It's text on purpose: Render's secret-file box is a paste box, and pasting the raw binary version corrupts it.) Every boot then restores your chats. It's a snapshot — re-download and re-paste after important chats to refresh it.</p>
 <p><a class="btn" href="/backup/state" download>Download chat backup (text)</a></p>`;
   } else {
     body += `<p class="small">No chats found yet — start a conversation in the hub first, then reload this page.</p>`;
@@ -232,7 +232,7 @@ function backupPage(res) {
   res.end(page("Session backup", body));
 }
 
-const STATE_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli");
+const STATE_DIR = path.join(os.homedir(), ".gemini");
 
 function backupDownload(res, name) {
   if (name === "state") {

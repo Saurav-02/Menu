@@ -15,18 +15,23 @@ import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
 
-// The chat state worth preserving, relative to ~/.gemini/antigravity-cli.
-// Everything else in that dir is regenerable (bin/, log/, cache/...).
+// The state worth preserving, relative to ~/.gemini: the chat state under
+// antigravity-cli/ plus the user settings (config/config.json holds the
+// hub's userSettings — permission preset, auto-execution policy, MCP
+// allow-grants, toggles). Everything else is regenerable (bin/, log/,
+// cache/, config/node_modules, ...).
 export const STATE_PATHS = [
-  "conversations",
-  "brain",
-  "annotations",
-  "conversation_summaries.db",
-  "agyhub_summaries_proto.pb",
-  "jetbox_summaries_proto.pb",
-  "history.jsonl",
-  "settings.json",
-  "antigravity_state.pbtxt",
+  "antigravity-cli/conversations",
+  "antigravity-cli/brain",
+  "antigravity-cli/annotations",
+  "antigravity-cli/conversation_summaries.db",
+  "antigravity-cli/agyhub_summaries_proto.pb",
+  "antigravity-cli/jetbox_summaries_proto.pb",
+  "antigravity-cli/history.jsonl",
+  "antigravity-cli/settings.json",
+  "antigravity-cli/antigravity_state.pbtxt",
+  "antigravity-cli/jetski_state.pbtxt",
+  "config/config.json",
 ];
 
 function walk(base, rel, out) {
@@ -120,7 +125,9 @@ export function unpackState(gzBuffer, destDir) {
   const tar = zlib.gunzipSync(raw);
   const root = path.resolve(destDir);
   fs.mkdirSync(root, { recursive: true });
-  let off = 0, longName = null, count = 0;
+  // First pass: parse the entries (headers only; data stays as views).
+  const entries = [];
+  let off = 0, longName = null;
   while (off + 512 <= tar.length) {
     const h = tar.subarray(off, off + 512);
     if (h.every((b) => b === 0)) break;
@@ -135,20 +142,29 @@ export function unpackState(gzBuffer, destDir) {
     } else {
       const name = longName || (prefix ? prefix + "/" + rawName : rawName);
       longName = null;
-      const dest = path.resolve(root, name);
-      if (dest !== root && !dest.startsWith(root + path.sep)) {
-        throw new Error(`unsafe path in archive: ${name}`);
-      }
-      if (type === "5") {
-        fs.mkdirSync(dest, { recursive: true });
-      } else if (type === "0" || type === "\0") {
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.writeFileSync(dest, data);
-        try { fs.chmodSync(dest, mode & 0o7777); } catch { /* best effort */ }
-        count++;
-      }
+      entries.push({ name, type, mode, data });
     }
     off += 512 + Math.ceil(size / 512) * 512;
+  }
+  // Archives packed before the ~/.gemini-root layout hold paths relative
+  // to antigravity-cli/ itself ("conversations/..."). Detect that layout
+  // and land those entries under antigravity-cli/ where they belong.
+  const legacy = entries.length > 0 && !entries.some((e) => e.name.startsWith("antigravity-cli/") || e.name.startsWith("config/"));
+  let count = 0;
+  for (const e of entries) {
+    const name = legacy ? "antigravity-cli/" + e.name : e.name;
+    const dest = path.resolve(root, name);
+    if (dest !== root && !dest.startsWith(root + path.sep)) {
+      throw new Error(`unsafe path in archive: ${name}`);
+    }
+    if (e.type === "5") {
+      fs.mkdirSync(dest, { recursive: true });
+    } else if (e.type === "0" || e.type === "\0") {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.writeFileSync(dest, e.data);
+      try { fs.chmodSync(dest, e.mode & 0o7777); } catch { /* best effort */ }
+      count++;
+    }
   }
   return count;
 }

@@ -36,8 +36,8 @@ fi
 # exactly: agy-state.tar.gz (optional — without it the hub boots with
 # empty history, because Render wipes the disk on every restart).
 if [ -f /etc/secrets/agy-state.tar.gz ]; then
-  mkdir -p "$HOME/.gemini/antigravity-cli"
-  if node "$SCRIPT_DIR/statetool.mjs" unpack /etc/secrets/agy-state.tar.gz "$HOME/.gemini/antigravity-cli"; then
+  mkdir -p "$HOME/.gemini"
+  if node "$SCRIPT_DIR/statetool.mjs" unpack /etc/secrets/agy-state.tar.gz "$HOME/.gemini"; then
     echo "Restored chat state from secret file."
   else
     echo "Chat state restore FAILED — booting with empty history." >&2
@@ -56,8 +56,8 @@ if [ -n "${STATE_GITHUB_TOKEN:-}" ] && [ -n "${STATE_GITHUB_REPO:-}" ]; then
       -H "Accept: application/vnd.github.raw+json" \
       "${STATE_GITHUB_API:-https://api.github.com}/repos/$STATE_GITHUB_REPO/contents/agy-state.txt?ref=main" \
       -o "$STATE_TMP" && [ -s "$STATE_TMP" ]; then
-    mkdir -p "$HOME/.gemini/antigravity-cli"
-    if node "$SCRIPT_DIR/statetool.mjs" unpack "$STATE_TMP" "$HOME/.gemini/antigravity-cli"; then
+    mkdir -p "$HOME/.gemini"
+    if node "$SCRIPT_DIR/statetool.mjs" unpack "$STATE_TMP" "$HOME/.gemini"; then
       echo "Restored chat state from GitHub."
     else
       echo "Chat state restore from GitHub FAILED — keeping secret-file state." >&2
