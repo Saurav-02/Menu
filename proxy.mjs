@@ -20,6 +20,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { packState, stateInfo } from "./statetool.mjs";
 
 const PORT = Number(process.env.PORT || 10000);
 const TARGET_HOST = "127.0.0.1";
@@ -216,11 +217,37 @@ function backupPage(res) {
       body += `<p class="small"><code>${esc(name)}</code> — not found. Sign in to the hub first, then reload this page.</p>`;
     }
   }
+  // Chat backup: the hub's conversations live only on this container's
+  // throwaway disk. This packs them into one file that rides the same
+  // secret-file route as the sign-in token (start.sh restores it at boot).
+  const info = stateInfo(STATE_DIR);
+  body += `<h2 style="margin-top:28px">Chat backup</h2>`;
+  if (info.files > 0) {
+    body += `<p class="small">Your conversations (${info.files} files, ${(info.bytes / 1024).toFixed(0)} KB, last changed ${esc(new Date(info.newest).toISOString())}) packed into one file. Download it and add it in Render as a third secret file named <b>exactly</b> <code>agy-state.tar.gz</code>. Every boot then restores your chats. It's a snapshot — re-download and re-upload after important chats to refresh it.</p>
+<p><a class="btn" href="/backup/state" download>Download chat backup (agy-state.tar.gz)</a></p>`;
+  } else {
+    body += `<p class="small">No chats found yet — start a conversation in the hub first, then reload this page.</p>`;
+  }
   res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(page("Session backup", body));
 }
 
+const STATE_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli");
+
 function backupDownload(res, name) {
+  if (name === "state") {
+    let buf;
+    try { buf = packState(STATE_DIR); } catch { buf = null; }
+    if (!buf || buf.length === 0) { res.writeHead(404, { "Content-Type": "text/plain" }); res.end("no chat state found\n"); return; }
+    res.writeHead(200, {
+      "Content-Type": "application/gzip",
+      "Content-Disposition": 'attachment; filename="agy-state.tar.gz"',
+      "Content-Length": buf.length,
+      "Cache-Control": "no-store",
+    });
+    res.end(buf);
+    return;
+  }
   const file = TOKEN_FILES[name];
   if (!file) { res.writeHead(404, { "Content-Type": "text/plain" }); res.end("not found\n"); return; }
   fs.readFile(file, (err, data) => {

@@ -20,6 +20,30 @@ if [ -f /etc/secrets/jetski-standalone-oauth-token ]; then
   echo "Seeded jetski-standalone-oauth-token from secret file."
 fi
 
+# --- 1b. Seed the bundled Antigravity skills (repo folder: skills/).
+# Each subfolder is one skill: skills/<skill-name>/SKILL.md. They are copied
+# into agy's global skills dir at every boot, so skill edits made in this
+# repo survive Render's disk wipes (unlike edits made inside a live chat).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -d "$SCRIPT_DIR/skills" ]; then
+  mkdir -p "$HOME/.gemini/config/skills"
+  cp -r "$SCRIPT_DIR/skills/." "$HOME/.gemini/config/skills/"
+  echo "Seeded skills into ~/.gemini/config/skills/"
+fi
+
+# --- 1c. Restore the chat state, if provided as a Render secret file.
+# Download from the gate's /backup page and add as a secret file named
+# exactly: agy-state.tar.gz (optional — without it the hub boots with
+# empty history, because Render wipes the disk on every restart).
+if [ -f /etc/secrets/agy-state.tar.gz ]; then
+  mkdir -p "$HOME/.gemini/antigravity-cli"
+  if node "$SCRIPT_DIR/statetool.mjs" unpack /etc/secrets/agy-state.tar.gz "$HOME/.gemini/antigravity-cli"; then
+    echo "Restored chat state from secret file."
+  else
+    echo "Chat state restore FAILED — booting with empty history." >&2
+  fi
+fi
+
 # --- 2. Attach the GitHub MCP bridge (same one the desktop app uses).
 # Set MCP_BRIDGE_URL in Render env if the bridge address or key changes.
 agy mcp add github-bridge "${MCP_BRIDGE_URL:-https://mcp-2-75va.onrender.com}" || true

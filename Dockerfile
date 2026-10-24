@@ -12,7 +12,8 @@ RUN apt-get update \
 RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
 
 WORKDIR /app
-COPY proxy.mjs start.sh ./
+COPY proxy.mjs start.sh statetool.mjs ./
+COPY skills ./skills
 RUN chmod +x start.sh
 
 # Render sets $PORT at runtime; start.sh is the single entrypoint:
