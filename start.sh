@@ -44,6 +44,30 @@ if [ -f /etc/secrets/agy-state.tar.gz ]; then
   fi
 fi
 
+# --- 1d. Restore the chat state from GitHub, if configured (wins over 1c).
+# With STATE_GITHUB_REPO + STATE_GITHUB_TOKEN set, the gate keeps a fresh
+# snapshot of the chat state in that (private!) repo as agy-state.txt, and
+# it is newer than any manually pasted secret file — so pull it last.
+# First run 404s (nothing pushed yet): fine, boot continues either way.
+if [ -n "${STATE_GITHUB_TOKEN:-}" ] && [ -n "${STATE_GITHUB_REPO:-}" ]; then
+  STATE_TMP="$(mktemp)"
+  if curl -fsSL --max-time 30 \
+      -H "Authorization: Bearer $STATE_GITHUB_TOKEN" \
+      -H "Accept: application/vnd.github.raw+json" \
+      "${STATE_GITHUB_API:-https://api.github.com}/repos/$STATE_GITHUB_REPO/contents/agy-state.txt?ref=main" \
+      -o "$STATE_TMP" && [ -s "$STATE_TMP" ]; then
+    mkdir -p "$HOME/.gemini/antigravity-cli"
+    if node "$SCRIPT_DIR/statetool.mjs" unpack "$STATE_TMP" "$HOME/.gemini/antigravity-cli"; then
+      echo "Restored chat state from GitHub."
+    else
+      echo "Chat state restore from GitHub FAILED — keeping secret-file state." >&2
+    fi
+  else
+    echo "No GitHub chat state pulled (first run or unreachable) — keeping secret-file state."
+  fi
+  rm -f "$STATE_TMP"
+fi
+
 # --- 2. Attach the GitHub MCP bridge (same one the desktop app uses).
 # Set MCP_BRIDGE_URL in Render env if the bridge address or key changes.
 agy mcp add github-bridge "${MCP_BRIDGE_URL:-https://mcp-2-75va.onrender.com}" || true

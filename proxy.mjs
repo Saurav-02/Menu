@@ -20,7 +20,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { packState, stateInfo } from "./statetool.mjs";
+import { packStateText, stateInfo } from "./statetool.mjs";
 
 const PORT = Number(process.env.PORT || 10000);
 const TARGET_HOST = "127.0.0.1";
@@ -223,8 +223,8 @@ function backupPage(res) {
   const info = stateInfo(STATE_DIR);
   body += `<h2 style="margin-top:28px">Chat backup</h2>`;
   if (info.files > 0) {
-    body += `<p class="small">Your conversations (${info.files} files, ${(info.bytes / 1024).toFixed(0)} KB, last changed ${esc(new Date(info.newest).toISOString())}) packed into one file. Download it and add it in Render as a third secret file named <b>exactly</b> <code>agy-state.tar.gz</code>. Every boot then restores your chats. It's a snapshot — re-download and re-upload after important chats to refresh it.</p>
-<p><a class="btn" href="/backup/state" download>Download chat backup (agy-state.tar.gz)</a></p>`;
+    body += `<p class="small">Your conversations (${info.files} files, ${(info.bytes / 1024).toFixed(0)} KB, last changed ${esc(new Date(info.newest).toISOString())}) packed into one <b>text</b> file. Download it, open it, copy <b>all</b> the text, and paste it in Render as the contents of a secret file named <b>exactly</b> <code>agy-state.tar.gz</code>. (It's text on purpose: Render's secret-file box is a paste box, and pasting the raw binary version corrupts it.) Every boot then restores your chats. It's a snapshot — re-download and re-paste after important chats to refresh it.</p>
+<p><a class="btn" href="/backup/state" download>Download chat backup (text)</a></p>`;
   } else {
     body += `<p class="small">No chats found yet — start a conversation in the hub first, then reload this page.</p>`;
   }
@@ -236,16 +236,16 @@ const STATE_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli");
 
 function backupDownload(res, name) {
   if (name === "state") {
-    let buf;
-    try { buf = packState(STATE_DIR); } catch { buf = null; }
-    if (!buf || buf.length === 0) { res.writeHead(404, { "Content-Type": "text/plain" }); res.end("no chat state found\n"); return; }
+    let text;
+    try { text = packStateText(STATE_DIR); } catch { text = null; }
+    if (!text) { res.writeHead(404, { "Content-Type": "text/plain" }); res.end("no chat state found\n"); return; }
     res.writeHead(200, {
-      "Content-Type": "application/gzip",
-      "Content-Disposition": 'attachment; filename="agy-state.tar.gz"',
-      "Content-Length": buf.length,
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="agy-state-base64.txt"',
+      "Content-Length": Buffer.byteLength(text),
       "Cache-Control": "no-store",
     });
-    res.end(buf);
+    res.end(text);
     return;
   }
   const file = TOKEN_FILES[name];
@@ -260,6 +260,96 @@ function backupDownload(res, name) {
     });
     res.end(data);
   });
+}
+
+// --- Optional automatic chat-state sync to GitHub -------------------------
+// Active only when STATE_GITHUB_REPO + STATE_GITHUB_TOKEN are both set
+// (a fine-grained PAT with Contents RW on that one PRIVATE repo). The gate
+// packs the chat state (the same base64 text /backup serves) every few
+// minutes when it changed and PUTs it to agy-state.txt on branch main;
+// start.sh pulls it back at boot (section 1d, winning over the secret
+// file), so restarts restore the freshest chats with no manual
+// download/paste. Failures are logged once per attempt and swallowed —
+// sync must never disturb request handling.
+const SYNC_REPO = process.env.STATE_GITHUB_REPO || "";
+const SYNC_TOKEN = process.env.STATE_GITHUB_TOKEN || "";
+const SYNC_API = (process.env.STATE_GITHUB_API || "https://api.github.com").replace(/\/+$/, "");
+const SYNC_INTERVAL_MS = Number(process.env.STATE_SYNC_INTERVAL_MS || 180000);
+const SYNC_INITIAL_MS = Number(process.env.STATE_SYNC_INITIAL_MS || 30000);
+const SYNC_URL = `${SYNC_API}/repos/${SYNC_REPO}/contents/agy-state.txt`;
+
+let syncLastHash = "";
+let syncSha = null;
+let syncBusy = false;
+
+function syncHeaders(extra = {}) {
+  return {
+    Authorization: `Bearer ${SYNC_TOKEN}`,
+    "X-GitHub-Api-Version": "2022-11-28",
+    "User-Agent": "agy-hub-gate",
+    ...extra,
+  };
+}
+
+// Learn the current file's sha (needed to overwrite it). Returns false on
+// 404 — the file doesn't exist yet, so a PUT without sha creates it.
+async function syncFetchSha() {
+  const r = await fetch(`${SYNC_URL}?ref=main`, { headers: syncHeaders({ Accept: "application/vnd.github+json" }) });
+  if (r.status === 404) { syncSha = null; return false; }
+  if (!r.ok) throw new Error(`GET state sha -> HTTP ${r.status}`);
+  const j = await r.json();
+  syncSha = j.sha || null;
+  return true;
+}
+
+async function syncPushOnce() {
+  if (syncBusy) return;
+  syncBusy = true;
+  try {
+    const info = stateInfo(STATE_DIR);
+    if (!info || info.files === 0) return;
+    const text = packStateText(STATE_DIR);
+    const hash = crypto.createHash("sha256").update(text).digest("hex");
+    if (hash === syncLastHash) return; // unchanged since last good push
+    // Two base64 layers are intended: the file content IS our base64 text,
+    // and the Contents API base64-wraps whatever file bytes it stores.
+    const content = Buffer.from(text, "utf8").toString("base64");
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (syncSha === null && attempt === 0) await syncFetchSha();
+      const body = { message: "hub state snapshot", branch: "main", content };
+      if (syncSha) body.sha = syncSha;
+      const r = await fetch(SYNC_URL, {
+        method: "PUT",
+        headers: syncHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(body),
+      });
+      if (r.ok) {
+        const j = await r.json().catch(() => null);
+        if (j && j.content && j.content.sha) syncSha = j.content.sha;
+        syncLastHash = hash;
+        console.log(`state sync: pushed snapshot (${text.length} chars) to ${SYNC_REPO}`);
+        return;
+      }
+      if ((r.status === 409 || r.status === 422) && attempt === 0) {
+        syncSha = null;
+        await syncFetchSha(); // stale sha — refresh and retry the PUT once
+        continue;
+      }
+      throw new Error(`PUT state -> HTTP ${r.status}`);
+    }
+  } catch (e) {
+    console.log(`state sync: ${e && e.message ? e.message : e} (will retry next tick)`);
+  } finally {
+    syncBusy = false;
+  }
+}
+
+if (SYNC_REPO && SYNC_TOKEN) {
+  console.log(`state sync: on — ${SYNC_REPO} every ${Math.round(SYNC_INTERVAL_MS / 1000)}s`);
+  const firstSync = setTimeout(syncPushOnce, SYNC_INITIAL_MS);
+  firstSync.unref();
+  const syncTimer = setInterval(syncPushOnce, SYNC_INTERVAL_MS);
+  syncTimer.unref();
 }
 
 const server = http.createServer((req, res) => {
