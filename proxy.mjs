@@ -386,12 +386,19 @@ async function syncPushOnce() {
   }
 }
 
-if (SYNC_REPO && SYNC_TOKEN) {
+// Chat recovery DISABLED 2026-10-26 at Saurav's order: the periodic
+// push runs only with STATE_RECOVERY=1 in Render env (default off).
+// With recovery off, no snapshot is pushed, so the last snapshot in
+// Saurav-02/hub-state stays untouched — it is a last backup, not
+// restored. Set STATE_RECOVERY=1 to re-enable restore + push together.
+if (SYNC_REPO && SYNC_TOKEN && process.env.STATE_RECOVERY === "1") {
   console.log(`state sync: on — ${SYNC_REPO} every ${Math.round(SYNC_INTERVAL_MS / 1000)}s`);
   const firstSync = setTimeout(syncPushOnce, SYNC_INITIAL_MS);
   firstSync.unref();
   const syncTimer = setInterval(syncPushOnce, SYNC_INTERVAL_MS);
   syncTimer.unref();
+} else if (SYNC_REPO && SYNC_TOKEN) {
+  console.log("state sync: off — chat recovery disabled (STATE_RECOVERY != 1)");
 }
 
 // --- PWA install + view entry points --------------------------------------

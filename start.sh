@@ -31,11 +31,15 @@ if [ -d "$SCRIPT_DIR/skills" ]; then
   echo "Seeded skills into ~/.gemini/config/skills/"
 fi
 
-# --- 1c. Restore the chat state, if provided as a Render secret file.
+# --- 1c. Chat recovery DISABLED 2026-10-26 at Saurav's order.
+# The secret-file restore below runs only if STATE_RECOVERY=1 is set in
+# Render env (default off). Without it the hub boots with whatever is on
+# the (ephemeral) disk, and Render's next disk wipe starts it empty —
+# no old chats are pulled back in.
 # Download from the gate's /backup page and add as a secret file named
 # exactly: agy-state.tar.gz (optional — without it the hub boots with
 # empty history, because Render wipes the disk on every restart).
-if [ -f /etc/secrets/agy-state.tar.gz ]; then
+if [ "${STATE_RECOVERY:-0}" = "1" ] && [ -f /etc/secrets/agy-state.tar.gz ]; then
   mkdir -p "$HOME/.gemini"
   if node "$SCRIPT_DIR/statetool.mjs" unpack /etc/secrets/agy-state.tar.gz "$HOME/.gemini"; then
     echo "Restored chat state from secret file."
@@ -45,6 +49,10 @@ if [ -f /etc/secrets/agy-state.tar.gz ]; then
 fi
 
 # --- 1d. Restore the chat state from GitHub, if configured (wins over 1c).
+# DISABLED 2026-10-26 at Saurav's order: runs only with STATE_RECOVERY=1.
+# With recovery off, the GitHub snapshot in Saurav-02/hub-state is left
+# untouched (a last backup, not restored) — delete it by hand if he ever
+# wants it gone for good.
 # With STATE_GITHUB_REPO + STATE_GITHUB_TOKEN set, the gate keeps a fresh
 # snapshot of the chat state in that (private!) repo, and it is newer than
 # any manually pasted secret file — so pull it last. Try the current
@@ -52,7 +60,7 @@ fi
 # then fall back to the legacy format (agy-state.txt, base64 text via the
 # Contents API) — never boot empty while a good old snapshot exists.
 # First run 404s on both (nothing pushed yet): fine, boot continues either way.
-if [ -n "${STATE_GITHUB_TOKEN:-}" ] && [ -n "${STATE_GITHUB_REPO:-}" ]; then
+if [ "${STATE_RECOVERY:-0}" = "1" ] && [ -n "${STATE_GITHUB_TOKEN:-}" ] && [ -n "${STATE_GITHUB_REPO:-}" ]; then
   STATE_TMP="$(mktemp)"
   STATE_PULLED=""
   if curl -fsSL --max-time 30 \
@@ -79,6 +87,9 @@ if [ -n "${STATE_GITHUB_TOKEN:-}" ] && [ -n "${STATE_GITHUB_REPO:-}" ]; then
     echo "No GitHub chat state pulled (first run or unreachable) — keeping secret-file state."
   fi
   rm -f "$STATE_TMP"
+fi
+if [ "${STATE_RECOVERY:-0}" != "1" ]; then
+  echo "Chat recovery disabled (STATE_RECOVERY != 1) — no chat state restored."
 fi
 
 # --- 2. Attach the GitHub MCP bridge (same one the desktop app uses).
